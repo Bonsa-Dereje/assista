@@ -26,14 +26,9 @@
   }
 
   // ---------- Toolbar state ----------
-  let activeTool = 'move';
   let keyboardVisible = false;
   let keyboardLocked = false;
   let touchpadLocked = false;
-
-  function selectTool(name) {
-    activeTool = name;
-  }
 
   function toggleKeyboardPanel() {
     keyboardVisible = !keyboardVisible;
@@ -122,24 +117,45 @@
 
     <button
       class="tool-btn"
-      class:active={activeTool === 'move'}
-      title="Move"
-      on:click={() => selectTool('move')}
+      class:active={pressed === '↑'}
+      title="Up"
+      on:click={() => keyPress('↑')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 3v18M3 12h18" />
-        <path d="M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3" />
+        <path d="M12 19V5M5 12l7-7 7 7" />
       </svg>
     </button>
 
     <button
       class="tool-btn"
-      class:active={activeTool === 'pointer'}
-      title="Pointer"
-      on:click={() => selectTool('pointer')}
+      class:active={pressed === '↓'}
+      title="Down"
+      on:click={() => keyPress('↓')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M5 3l6 17 2.2-7.2L20 10.6 5 3z" />
+        <path d="M12 5v14M5 12l7 7 7-7" />
+      </svg>
+    </button>
+
+    <button
+      class="tool-btn"
+      class:active={pressed === '←'}
+      title="Left"
+      on:click={() => keyPress('←')}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 12H5M12 5l-7 7 7 7" />
+      </svg>
+    </button>
+
+    <button
+      class="tool-btn"
+      class:active={pressed === '→'}
+      title="Right"
+      on:click={() => keyPress('→')}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12h14M12 5l7 7-7 7" />
       </svg>
     </button>
 
