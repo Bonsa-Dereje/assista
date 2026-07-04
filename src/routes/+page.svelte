@@ -13,8 +13,19 @@
       // Whole surface starts click-through; toolbar/keyboard re-enable it on hover.
       await appWindow.setIgnoreCursorEvents(true);
     }
-    keyboardPos = { x: window.innerWidth - KB_WIDTH - 40, y: 90 };
+    // Toolbar sits at left:18px, width:50px -> place keyboard just to its right for now.
+    keyboardPos = clampKbPos(18 + 50 + 12, 60);
+    window.addEventListener('resize', onWindowResize);
   });
+
+  function clampKbPos(x, y) {
+    const maxX = Math.max(8, window.innerWidth - KB_WIDTH - 8);
+    return { x: Math.min(Math.max(8, x), maxX), y: Math.max(8, y) };
+  }
+
+  function onWindowResize() {
+    keyboardPos = clampKbPos(keyboardPos.x, keyboardPos.y);
+  }
 
   async function setInteractive(interactive) {
     if (tauriReady) await appWindow.setIgnoreCursorEvents(!interactive);
@@ -63,10 +74,7 @@
 
   function onKbDrag(e) {
     if (!kbDragging) return;
-    keyboardPos = {
-      x: Math.max(8, e.clientX - kbOffset.x),
-      y: Math.max(8, e.clientY - kbOffset.y)
-    };
+    keyboardPos = clampKbPos(e.clientX - kbOffset.x, e.clientY - kbOffset.y);
   }
 
   function endKbDrag() {
@@ -78,6 +86,7 @@
   onDestroy(() => {
     window.removeEventListener('pointermove', onKbDrag);
     window.removeEventListener('pointerup', endKbDrag);
+    window.removeEventListener('resize', onWindowResize);
   });
 
   // ---------- Keyboard key layout ----------
