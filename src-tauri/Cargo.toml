@@ -24,13 +24,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Needed by lib.rs for the global keyboard/touchpad lock (WH_KEYBOARD_LL /
-# WH_MOUSE_LL hooks). Windows-only: this target block is simply skipped
-# when building for macOS/Linux, where those commands return an
-# "unsupported" error instead.
+# WH_MOUSE_LL hooks), key injection (SendInput), and the non-activating
+# window fix (SetWindowLongPtrW / ShowWindow). Windows-only: this target
+# block is simply skipped when building for macOS/Linux, where those
+# commands return an "unsupported" error instead.
+#
+# IMPORTANT: this version must match whatever `windows`/`windows-core`
+# version Tauri itself pulls in transitively (check with
+# `cargo tree -i windows-core`), or `tauri::WebviewWindow::hwnd()`'s HWND
+# type won't match the HWND type used by these Win32 calls, causing
+# "type mismatch resolving <HWND as TypeKind>" build errors. 0.61 matches
+# current Tauri 2.x; bump this again if a future Tauri update moves further.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }

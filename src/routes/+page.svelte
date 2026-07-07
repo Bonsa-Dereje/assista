@@ -146,6 +146,42 @@
   function keyPress(k) {
     pressed = k;
     setTimeout(() => { if (pressed === k) pressed = ''; }, 120);
+    if (tauriReady) {
+      // main is now a non-activating window (see lib.rs), so this click
+      // never took focus away in the first place — send_key lands on
+      // whatever window the user was actually directing input at.
+      invoke('send_key', { key: k, ctrl: false, alt: false, shift: false }).catch((err) =>
+        console.error('send_key failed:', err)
+      );
+    }
+  }
+
+  // ---------- Copy / paste ----------
+  // Same "press" flash as the directional keys, but backed by dedicated
+  // Rust commands (copy_shortcut / paste_shortcut) instead of the generic
+  // send_key, so they read clearly at the call site and stay easy to find.
+  async function copyPress() {
+    pressed = 'copy';
+    setTimeout(() => { if (pressed === 'copy') pressed = ''; }, 120);
+    if (!tauriReady) return;
+    try {
+      await invoke('copy_shortcut');
+    } catch (err) {
+      console.error('copy_shortcut failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not copy on this OS.');
+    }
+  }
+
+  async function pastePress() {
+    pressed = 'paste';
+    setTimeout(() => { if (pressed === 'paste') pressed = ''; }, 120);
+    if (!tauriReady) return;
+    try {
+      await invoke('paste_shortcut');
+    } catch (err) {
+      console.error('paste_shortcut failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not paste on this OS.');
+    }
   }
 </script>
 
@@ -206,6 +242,35 @@
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M5 12h14M12 5l7 7-7 7" />
+      </svg>
+    </button>
+
+    <div class="divider"></div>
+
+    <!-- Copy -->
+    <button
+      class="tool-btn"
+      class:active={pressed === 'copy'}
+      title="Copy (Ctrl+C)"
+      on:click={copyPress}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="12" height="12" rx="2" />
+        <path d="M6 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V6" />
+      </svg>
+    </button>
+
+    <!-- Paste -->
+    <button
+      class="tool-btn"
+      class:active={pressed === 'paste'}
+      title="Paste (Ctrl+V)"
+      on:click={pastePress}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="6" y="4" width="12" height="17" rx="2" />
+        <path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4" />
+        <path d="M9 12h6M9 16h6" />
       </svg>
     </button>
 

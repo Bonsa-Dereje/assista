@@ -4,6 +4,13 @@
   let appWindow = null;
   let tauriReady = false;
   let emit = null;
+  let invoke = null;
+
+  // Sticky modifiers: tapping Ctrl/Alt/Shift toggles them "held" until the
+  // next non-modifier key is sent (then they release), like a real OSK.
+  let ctrlHeld = false;
+  let altHeld = false;
+  let shiftHeld = false;
 
   // Same idea as the toolbar window: this element's real box is what the
   // OS window is kept sized to, so the keyboard window never extends past
@@ -23,9 +30,11 @@
     if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
       const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
       const eventApi = await import('@tauri-apps/api/event');
+      const core = await import('@tauri-apps/api/core');
 
       appWindow = getCurrentWindow();
       emit = eventApi.emit;
+      invoke = core.invoke;
       tauriReady = true;
       window.__tauriLogicalSize = LogicalSize;
 
@@ -69,9 +78,21 @@
   function keyPress(k) {
     pressed = k;
     setTimeout(() => { if (pressed === k) pressed = ''; }, 120);
-    // If key presses need to actually type into the focused external app,
-    // call your Rust command here, e.g.:
-    // invoke('send_key', { key: k });
+
+    if (k === 'Ctrl') { ctrlHeld = !ctrlHeld; return; }
+    if (k === 'Alt')  { altHeld = !altHeld; return; }
+    if (k === '⇧')    { shiftHeld = !shiftHeld; return; }
+
+    if (tauriReady) {
+      // This window is non-activating (see lib.rs), so it never took OS
+      // focus in the first place — send_key lands on whatever window the
+      // user was actually typing into.
+      invoke('send_key', { key: k, ctrl: ctrlHeld, alt: altHeld, shift: shiftHeld }).catch((err) =>
+        console.error('send_key failed:', err)
+      );
+    }
+    // One-shot chord: modifiers release after being used once, like a real OSK.
+    ctrlHeld = altHeld = shiftHeld = false;
   }
 </script>
 
@@ -106,6 +127,7 @@
             class:pressed={pressed === key}
             class:wide={key === '⌫' || key === '↵' || key === '⇧' || key === 'Ctrl' || key === 'Alt'}
             class:space={key === '␣'}
+            class:held={(key === 'Ctrl' && ctrlHeld) || (key === 'Alt' && altHeld) || (key === '⇧' && shiftHeld)}
             on:click={() => keyPress(key)}
           >
             {key}
@@ -211,4 +233,9 @@
   }
   .kb-key.wide { flex: 1.8; font-size: 8px; }
   .kb-key.space { flex: 5; }
+  .kb-key.held {
+    background: rgba(242, 242, 244, 0.22);
+    border-color: rgba(242, 242, 244, 0.35);
+    color: #fff;
+  }
 </style>
