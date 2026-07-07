@@ -4,14 +4,45 @@
   // ---------- Tauri window handle ----------
   let appWindow = null;
   let tauriReady = false;
+  let invoke = null; // set once Tauri's API is available
+
+  // Brief, dismissable status line for lock errors (e.g. unsupported OS)
+  // and for the escape-hotkey force-unlock, surfaced near the lock buttons.
+  let lockNotice = '';
+  let lockNoticeTimer = null;
+  function flashLockNotice(text) {
+    lockNotice = text;
+    clearTimeout(lockNoticeTimer);
+    lockNoticeTimer = setTimeout(() => (lockNotice = ''), 3500);
+  }
+
+  let unlistenForceUnlock = null;
 
   onMount(async () => {
     if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const core = await import('@tauri-apps/api/core');
+      const { listen } = await import('@tauri-apps/api/event');
+
       appWindow = getCurrentWindow();
+      invoke = core.invoke;
       tauriReady = true;
       // Whole surface starts click-through; toolbar/keyboard re-enable it on hover.
       await appWindow.setIgnoreCursorEvents(true);
+
+      // Rust's low-level keyboard hook always lets Ctrl+Alt+Shift+U through
+      // and emits this event as a force-unlock signal, so the UI can never
+      // get stuck showing "locked" with no way back in.
+      unlistenForceUnlock = await listen('input-lock://force-unlock', async () => {
+        if (!keyboardLocked) return;
+        keyboardLocked = false;
+        try {
+          await invoke('set_keyboard_lock', { locked: false });
+        } catch (err) {
+          console.error('Failed to clear keyboard lock after escape hotkey:', err);
+        }
+        flashLockNotice('Keyboard unlocked (Ctrl+Alt+Shift+U)');
+      });
     }
     // Toolbar sits at left:18px, width:50px -> place keyboard just to its right for now.
     keyboardPos = clampKbPos(18 + 50 + 12, 60);
@@ -45,18 +76,30 @@
     keyboardVisible = !keyboardVisible;
   }
 
-  function toggleKeyboardLock() {
-    keyboardLocked = !keyboardLocked;
-    // TODO(rust): invoke('set_keyboard_lock', { locked: keyboardLocked })
-    // Rust side should register a low-level keyboard hook (Windows: WH_KEYBOARD_LL)
-    // and swallow events while locked, aside from this app's own shortcuts.
+  async function toggleKeyboardLock() {
+    if (!tauriReady) return;
+    const next = !keyboardLocked;
+    keyboardLocked = next; // optimistic; reverted below on failure
+    try {
+      await invoke('set_keyboard_lock', { locked: next });
+    } catch (err) {
+      keyboardLocked = !next; // revert
+      console.error('set_keyboard_lock failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not lock keyboard on this OS.');
+    }
   }
 
-  function toggleTouchpadLock() {
-    touchpadLocked = !touchpadLocked;
-    // TODO(rust): invoke('set_touchpad_lock', { locked: touchpadLocked })
-    // Rust side should disable the precision touchpad HID device or filter
-    // WM_INPUT/pointer events originating from it while locked.
+  async function toggleTouchpadLock() {
+    if (!tauriReady) return;
+    const next = !touchpadLocked;
+    touchpadLocked = next; // optimistic; reverted below on failure
+    try {
+      await invoke('set_touchpad_lock', { locked: next });
+    } catch (err) {
+      touchpadLocked = !next; // revert
+      console.error('set_touchpad_lock failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not lock touchpad on this OS.');
+    }
   }
 
   // ---------- Draggable on-screen keyboard ----------
@@ -87,6 +130,8 @@
     window.removeEventListener('pointermove', onKbDrag);
     window.removeEventListener('pointerup', endKbDrag);
     window.removeEventListener('resize', onWindowResize);
+    clearTimeout(lockNoticeTimer);
+    if (unlistenForceUnlock) unlistenForceUnlock();
   });
 
   // ---------- Keyboard key layout ----------
@@ -226,6 +271,12 @@
       </svg>
     </button>
   </aside>
+
+  {#if lockNotice}
+    <div class="lock-notice" style="left:{18 + 50 + 12}px; top:60px;">
+      {lockNotice}
+    </div>
+  {/if}
 
   <!-- ===================== ON-SCREEN KEYBOARD ===================== -->
   {#if keyboardVisible}
@@ -380,6 +431,21 @@
   .tool-btn.lockable.active .badge {
     background: #17171a;
     color: #e14a4a;
+  }
+
+  /* ===================== Lock notice ===================== */
+  .lock-notice {
+    pointer-events: none;
+    position: absolute;
+    max-width: 220px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: rgba(20, 20, 22, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: rgba(240, 240, 242, 0.92);
+    font-size: 11px;
+    line-height: 1.35;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
   }
 
   /* ===================== Keyboard panel ===================== */
