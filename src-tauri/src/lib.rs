@@ -7,6 +7,12 @@
 //   - send_key(key, ctrl, alt, shift)   -> inject a synthetic keystroke into
 //                                          whatever window currently has OS
 //                                          focus (i.e. NOT this app)
+//   - send_modified_key(key, shift)     -> send key with shift modifier
+//   - send_alt_tab()                    -> send Alt+Tab to switch windows
+//   - mouse_click_down()                -> hold left mouse button
+//   - mouse_click_up()                  -> release left mouse button
+//   - undo_shortcut()                   -> send Ctrl+Z
+//   - redo_shortcut()                   -> send Ctrl+Y
 //
 // All are implemented with Windows low-level hooks / SendInput since that's
 // the only reliable, no-driver way to intercept or inject input globally on
@@ -48,7 +54,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 /// Shared app state tracking lock status + the handle needed to tear a hook
 /// down again. Kept behind a Mutex because the hook lives on its own thread.
@@ -163,6 +169,21 @@ fn send_key(key: String, ctrl: bool, alt: bool, shift: bool) -> Result<(), Strin
     }
 }
 
+/// Sends a key with shift modifier (for selection via Shift+Arrow keys)
+#[tauri::command]
+fn send_modified_key(key: String, shift: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win::send_key(&key, false, false, shift)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (key, shift);
+        Err("Key injection is only implemented on Windows right now.".into())
+    }
+}
+
 /// Sends the OS "copy" shortcut (Ctrl+C) into whatever window currently has
 /// OS keyboard focus, via the same non-activating SendInput path as
 /// `send_key` — so clicking the toolbar's Copy button never steals focus
@@ -192,6 +213,76 @@ fn paste_shortcut() -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err("Paste is only implemented on Windows right now.".into())
+    }
+}
+
+/// Sends the OS "undo" shortcut (Ctrl+Z)
+#[tauri::command]
+fn undo_shortcut() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win::send_key("z", true, false, false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Undo is only implemented on Windows right now.".into())
+    }
+}
+
+/// Sends the OS "redo" shortcut (Ctrl+Y)
+#[tauri::command]
+fn redo_shortcut() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win::send_key("y", true, false, false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Redo is only implemented on Windows right now.".into())
+    }
+}
+
+/// Sends Alt+Tab to switch windows
+#[tauri::command]
+fn send_alt_tab() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win::send_alt_tab()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Alt+Tab is only implemented on Windows right now.".into())
+    }
+}
+
+/// Holds down the left mouse button (for drag operations)
+#[tauri::command]
+fn mouse_click_down() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win::mouse_click_down()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Mouse click is only implemented on Windows right now.".into())
+    }
+}
+
+/// Releases the left mouse button
+#[tauri::command]
+fn mouse_click_up() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win::mouse_click_up()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Mouse click is only implemented on Windows right now.".into())
     }
 }
 
@@ -226,8 +317,14 @@ pub fn run() {
             set_keyboard_lock,
             set_touchpad_lock,
             send_key,
+            send_modified_key,
             copy_shortcut,
             paste_shortcut,
+            undo_shortcut,
+            redo_shortcut,
+            send_alt_tab,
+            mouse_click_down,
+            mouse_click_up,
             show_keyboard_noactivate
         ])
         .setup(|app| {
@@ -265,9 +362,10 @@ mod win {
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
         VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT,
-        VK_SHIFT, VK_SPACE, VK_UP,
+        VK_SHIFT, VK_SPACE, VK_UP, VK_TAB,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CallWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
@@ -489,6 +587,22 @@ mod win {
         }
     }
 
+    fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
     /// Sends `key` as a synthetic keystroke, holding down whichever of
     /// ctrl/alt/shift are true around it (so the on-screen keyboard's
     /// sticky-modifier toggles act like a real chord, e.g. Shift+A).
@@ -520,6 +634,41 @@ mod win {
         let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
         if sent as usize != inputs.len() {
             return Err("SendInput did not deliver all events".into());
+        }
+        Ok(())
+    }
+
+    /// Sends Alt+Tab to switch windows
+    pub fn send_alt_tab() -> Result<(), String> {
+        let mut inputs = Vec::with_capacity(4);
+        inputs.push(key_input(VK_MENU, false));     // Alt down
+        inputs.push(key_input(VK_TAB, false));      // Tab down
+        inputs.push(key_input(VK_TAB, true));       // Tab up
+        inputs.push(key_input(VK_MENU, true));      // Alt up
+
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        if sent as usize != inputs.len() {
+            return Err("SendInput did not deliver all events".into());
+        }
+        Ok(())
+    }
+
+    /// Holds down the left mouse button
+    pub fn mouse_click_down() -> Result<(), String> {
+        let input = mouse_input(MOUSEEVENTF_LEFTDOWN);
+        let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        if sent != 1 {
+            return Err("SendInput did not deliver mouse down event".into());
+        }
+        Ok(())
+    }
+
+    /// Releases the left mouse button
+    pub fn mouse_click_up() -> Result<(), String> {
+        let input = mouse_input(MOUSEEVENTF_LEFTUP);
+        let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        if sent != 1 {
+            return Err("SendInput did not deliver mouse up event".into());
         }
         Ok(())
     }

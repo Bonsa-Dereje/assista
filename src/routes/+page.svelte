@@ -52,9 +52,6 @@
 
       keyboardWindow = await WebviewWindow.getByLabel('keyboard');
 
-      // The whole window IS the toolbar now, so there's nothing left to make
-      // click-through — no setIgnoreCursorEvents anywhere in this file.
-
       unlistenForceUnlock = await listen('input-lock://force-unlock', async () => {
         if (!keyboardLocked) return;
         keyboardLocked = false;
@@ -66,8 +63,6 @@
         flashLockNotice('Keyboard unlocked (Ctrl+Alt+Shift+U)');
       });
 
-      // If the keyboard window is closed via its own [x] button, keep our
-      // toggle state (and icon) in sync.
       unlistenKeyboardClosed = await listen('keyboard-window-closed', () => {
         keyboardVisible = false;
       });
@@ -87,14 +82,13 @@
   let keyboardVisible = false;
   let keyboardLocked = false;
   let touchpadLocked = false;
+  let mouseHeld = false;
 
   async function toggleKeyboardPanel() {
     keyboardVisible = !keyboardVisible;
     if (!tauriReady || !keyboardWindow) return;
 
     if (keyboardVisible) {
-      // Place the keyboard window just to the right of the toolbar, using
-      // the toolbar's own real on-screen position/size.
       const LogicalPosition = window.__tauriLogicalPosition;
       const physPos = await appWindow.outerPosition();
       const physSize = await appWindow.outerSize();
@@ -111,11 +105,11 @@
   async function toggleKeyboardLock() {
     if (!tauriReady) return;
     const next = !keyboardLocked;
-    keyboardLocked = next; // optimistic; reverted below on failure
+    keyboardLocked = next;
     try {
       await invoke('set_keyboard_lock', { locked: next });
     } catch (err) {
-      keyboardLocked = !next; // revert
+      keyboardLocked = !next;
       console.error('set_keyboard_lock failed:', err);
       flashLockNotice(typeof err === 'string' ? err : 'Could not lock keyboard on this OS.');
     }
@@ -124,14 +118,108 @@
   async function toggleTouchpadLock() {
     if (!tauriReady) return;
     const next = !touchpadLocked;
-    touchpadLocked = next; // optimistic; reverted below on failure
+    touchpadLocked = next;
     try {
       await invoke('set_touchpad_lock', { locked: next });
     } catch (err) {
-      touchpadLocked = !next; // revert
+      touchpadLocked = !next;
       console.error('set_touchpad_lock failed:', err);
       flashLockNotice(typeof err === 'string' ? err : 'Could not lock touchpad on this OS.');
     }
+  }
+
+  // ---------- Drag/selection state ----------
+  let isDragging = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let currentDirection = '';
+
+  // ---------- Directional buttons with drag support ----------
+  let pressed = '';
+  function keyPress(k) {
+    pressed = k;
+    setTimeout(() => { if (pressed === k) pressed = ''; }, 120);
+    if (tauriReady) {
+      invoke('send_key', { key: k, ctrl: false, alt: false, shift: false }).catch((err) =>
+        console.error('send_key failed:', err)
+      );
+    }
+  }
+
+  // Drag/selection handlers
+  function handleDragStart(e, direction) {
+    isDragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    currentDirection = direction;
+    
+    // Start shift+arrow sequence
+    if (tauriReady) {
+      // First, start with shift held + arrow key
+      invoke('send_modified_key', { key: direction, shift: true }).catch(console.error);
+      
+      // Show visual feedback - set active state with animation
+      document.querySelectorAll('.drag-btn').forEach(el => {
+        if (el.dataset.direction === direction) {
+          el.classList.add('drag-active');
+        }
+        el.style.opacity = '0.5';
+      });
+    }
+  }
+
+  function handleDragMove(e) {
+    if (!isDragging) return;
+    
+    // Calculate movement delta
+    const deltaX = e.clientX - dragStartX;
+    const deltaY = e.clientY - dragStartY;
+    
+    // Determine direction based on dominant movement
+    let newDirection = currentDirection;
+    if (Math.abs(deltaX) > 30 || Math.abs(deltaY) > 30) {
+      const absX = Math.abs(deltaX);
+      const absY = Math.abs(deltaY);
+      
+      if (absX > absY) {
+        newDirection = deltaX > 0 ? '→' : '←';
+      } else {
+        newDirection = deltaY > 0 ? '↓' : '↑';
+      }
+      
+      // If direction changed, send new shift+arrow
+      if (newDirection !== currentDirection) {
+        currentDirection = newDirection;
+        if (tauriReady) {
+          invoke('send_modified_key', { key: newDirection, shift: true }).catch(console.error);
+        }
+        // Update visual feedback
+        document.querySelectorAll('.drag-btn').forEach(el => {
+          if (el.dataset.direction === newDirection) {
+            el.classList.add('drag-active');
+          } else {
+            el.classList.remove('drag-active');
+          }
+        });
+      }
+    }
+  }
+
+  function handleDragEnd() {
+    if (!isDragging) return;
+    isDragging = false;
+    
+    // Stop shift+arrow
+    if (tauriReady) {
+      // Send release of shift key and stop selection
+      invoke('send_key', { key: currentDirection, ctrl: false, alt: false, shift: false }).catch(console.error);
+    }
+    
+    // Reset visual feedback
+    document.querySelectorAll('.drag-btn').forEach(el => {
+      el.classList.remove('drag-active');
+      el.style.opacity = '1';
+    });
   }
 
   onDestroy(() => {
@@ -139,27 +227,28 @@
     if (unlistenForceUnlock) unlistenForceUnlock();
     if (unlistenKeyboardClosed) unlistenKeyboardClosed();
     if (resizeObserver) resizeObserver.disconnect();
+    document.removeEventListener('mousemove', handleDragMove);
+    document.removeEventListener('mouseup', handleDragEnd);
   });
 
-  // ---------- Directional buttons ----------
-  let pressed = '';
-  function keyPress(k) {
-    pressed = k;
-    setTimeout(() => { if (pressed === k) pressed = ''; }, 120);
-    if (tauriReady) {
-      // main is now a non-activating window (see lib.rs), so this click
-      // never took focus away in the first place — send_key lands on
-      // whatever window the user was actually directing input at.
-      invoke('send_key', { key: k, ctrl: false, alt: false, shift: false }).catch((err) =>
-        console.error('send_key failed:', err)
-      );
+  // ---------- Mouse hold (click and drag) ----------
+  async function toggleMouseHold() {
+    if (!tauriReady) return;
+    mouseHeld = !mouseHeld;
+    try {
+      if (mouseHeld) {
+        await invoke('mouse_click_down');
+      } else {
+        await invoke('mouse_click_up');
+      }
+    } catch (err) {
+      mouseHeld = !mouseHeld;
+      console.error('mouse_click failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not control mouse on this OS.');
     }
   }
 
-  // ---------- Copy / paste ----------
-  // Same "press" flash as the directional keys, but backed by dedicated
-  // Rust commands (copy_shortcut / paste_shortcut) instead of the generic
-  // send_key, so they read clearly at the call site and stay easy to find.
+  // ---------- Copy / paste / undo / redo ----------
   async function copyPress() {
     pressed = 'copy';
     setTimeout(() => { if (pressed === 'copy') pressed = ''; }, 120);
@@ -183,6 +272,43 @@
       flashLockNotice(typeof err === 'string' ? err : 'Could not paste on this OS.');
     }
   }
+
+  async function undoPress() {
+    pressed = 'undo';
+    setTimeout(() => { if (pressed === 'undo') pressed = ''; }, 120);
+    if (!tauriReady) return;
+    try {
+      await invoke('undo_shortcut');
+    } catch (err) {
+      console.error('undo_shortcut failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not undo on this OS.');
+    }
+  }
+
+  async function redoPress() {
+    pressed = 'redo';
+    setTimeout(() => { if (pressed === 'redo') pressed = ''; }, 120);
+    if (!tauriReady) return;
+    try {
+      await invoke('redo_shortcut');
+    } catch (err) {
+      console.error('redo_shortcut failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not redo on this OS.');
+    }
+  }
+
+  // ---------- Alt+Tab ----------
+  async function altTabPress() {
+    pressed = 'alttab';
+    setTimeout(() => { if (pressed === 'alttab') pressed = ''; }, 120);
+    if (!tauriReady) return;
+    try {
+      await invoke('send_alt_tab');
+    } catch (err) {
+      console.error('send_alt_tab failed:', err);
+      flashLockNotice(typeof err === 'string' ? err : 'Could not switch windows on this OS.');
+    }
+  }
 </script>
 
 <div class="root" bind:this={rootEl}>
@@ -201,49 +327,72 @@
 
     <div class="divider"></div>
 
-    <button
-      class="tool-btn"
-      class:active={pressed === '↑'}
-      title="Up"
-      on:click={() => keyPress('↑')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 19V5M5 12l7-7 7 7" />
-      </svg>
-    </button>
+    <!-- Directional buttons with drag support -->
+    <div class="drag-btn-group">
+      <button
+        class="tool-btn drag-btn"
+        class:active={pressed === '↑'}
+        class:drag-active={isDragging && currentDirection === '↑'}
+        data-direction="↑"
+        title="Up (click) / Drag to select"
+        on:click={() => keyPress('↑')}
+        on:mousedown={() => handleDragStart(event, '↑')}
+        on:mouseenter={handleDragMove}
+        on:mouseleave={handleDragEnd}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 19V5M5 12l7-7 7 7" />
+        </svg>
+      </button>
 
-    <button
-      class="tool-btn"
-      class:active={pressed === '↓'}
-      title="Down"
-      on:click={() => keyPress('↓')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 5v14M5 12l7 7 7-7" />
-      </svg>
-    </button>
+      <button
+        class="tool-btn drag-btn"
+        class:active={pressed === '↓'}
+        class:drag-active={isDragging && currentDirection === '↓'}
+        data-direction="↓"
+        title="Down (click) / Drag to select"
+        on:click={() => keyPress('↓')}
+        on:mousedown={() => handleDragStart(event, '↓')}
+        on:mouseenter={handleDragMove}
+        on:mouseleave={handleDragEnd}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 5v14M5 12l7 7 7-7" />
+        </svg>
+      </button>
 
-    <button
-      class="tool-btn"
-      class:active={pressed === '←'}
-      title="Left"
-      on:click={() => keyPress('←')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M19 12H5M12 5l-7 7 7 7" />
-      </svg>
-    </button>
+      <button
+        class="tool-btn drag-btn"
+        class:active={pressed === '←'}
+        class:drag-active={isDragging && currentDirection === '←'}
+        data-direction="←"
+        title="Left (click) / Drag to select"
+        on:click={() => keyPress('←')}
+        on:mousedown={() => handleDragStart(event, '←')}
+        on:mouseenter={handleDragMove}
+        on:mouseleave={handleDragEnd}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 12H5M12 5l-7 7 7 7" />
+        </svg>
+      </button>
 
-    <button
-      class="tool-btn"
-      class:active={pressed === '→'}
-      title="Right"
-      on:click={() => keyPress('→')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M5 12h14M12 5l7 7-7 7" />
-      </svg>
-    </button>
+      <button
+        class="tool-btn drag-btn"
+        class:active={pressed === '→'}
+        class:drag-active={isDragging && currentDirection === '→'}
+        data-direction="→"
+        title="Right (click) / Drag to select"
+        on:click={() => keyPress('→')}
+        on:mousedown={() => handleDragStart(event, '→')}
+        on:mouseenter={handleDragMove}
+        on:mouseleave={handleDragEnd}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M12 5l7 7-7 7" />
+        </svg>
+      </button>
+    </div>
 
     <div class="divider"></div>
 
@@ -260,34 +409,82 @@
       </svg>
     </button>
 
-    <!-- Paste -->
+    <!-- Paste - fixed icon sizing -->
     <button
       class="tool-btn"
       class:active={pressed === 'paste'}
       title="Paste (Ctrl+V)"
       on:click={pastePress}
     >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="6" y="4" width="12" height="17" rx="2" />
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;">
+        <rect x="6" y="4" width="12" height="16" rx="2" />
         <path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4" />
-        <path d="M9 12h6M9 16h6" />
+        <path d="M9 10h6M9 13h6" />
+      </svg>
+    </button>
+
+    <!-- Undo -->
+    <button
+      class="tool-btn"
+      class:active={pressed === 'undo'}
+      title="Undo (Ctrl+Z)"
+      on:click={undoPress}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 7v6h6" />
+        <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+      </svg>
+    </button>
+
+    <!-- Redo -->
+    <button
+      class="tool-btn"
+      class:active={pressed === 'redo'}
+      title="Redo (Ctrl+Y)"
+      on:click={redoPress}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 7v6h-6" />
+        <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13" />
+      </svg>
+    </button>
+
+    <!-- Alt+Tab -->
+    <button
+      class="tool-btn"
+      class:active={pressed === 'alttab'}
+      title="Switch windows (Alt+Tab)"
+      on:click={altTabPress}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="5" width="18" height="14" rx="2" />
+        <path d="M3 10h18M3 14h18" />
+        <path d="M8 7v2M16 7v2" />
+      </svg>
+    </button>
+
+    <div class="divider"></div>
+
+    <!-- Mouse hold button -->
+    <button
+      class="tool-btn lockable"
+      class:active={mouseHeld}
+      title={mouseHeld ? 'Release mouse button' : 'Hold mouse button (drag mode)'}
+      on:click={toggleMouseHold}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5" y="3" width="14" height="18" rx="7" />
+        <path d="M12 3v5M9 6l3-3 3 3" />
+      </svg>
+      <svg class="badge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3" />
       </svg>
     </button>
 
     <div class="divider"></div>
 
     <!-- On-screen keyboard toggle -->
-    <button
-      class="tool-btn"
-      class:active={keyboardVisible}
-      title="On-screen keyboard"
-      on:click={toggleKeyboardPanel}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2.5" y="6" width="19" height="12" rx="2.4" />
-        <path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M6 14h9M16.5 14h1.5" />
-      </svg>
-    </button>
+   
 
     <!-- Lock keyboard -->
     <button
@@ -399,7 +596,7 @@
     color: rgba(230, 230, 233, 0.68);
     cursor: pointer;
     transition: background 0.12s ease, color 0.12s ease,
-      border-color 0.12s ease, transform 0.08s ease;
+      border-color 0.12s ease, transform 0.08s ease, opacity 0.2s ease;
   }
   .tool-btn svg { width: 18px; height: 18px; }
 
@@ -432,9 +629,38 @@
     color: #e14a4a;
   }
 
+  /* Drag button group */
+  .drag-btn-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: center;
+  }
+
+  .drag-btn-group .drag-btn {
+    width: 38px;
+    height: 32px;
+    transition: all 0.2s ease;
+  }
+
+  .drag-btn.drag-active {
+    background: #3a7bd5;
+    border-color: #3a7bd5;
+    color: #fff;
+    animation: pulse 0.6s ease-in-out infinite alternate;
+  }
+
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    100% { transform: scale(1.08); }
+  }
+
+  /* During drag mode, other buttons fade */
+  .toolbar.dragging .tool-btn:not(.drag-active) {
+    opacity: 0.4;
+  }
+
   /* ===================== Lock notice ===================== */
-  /* Normal flow now (not position:absolute) so it grows the window itself
-     rather than needing pre-reserved dead space around the toolbar. */
   .lock-notice {
     max-width: 220px;
     padding: 7px 10px;
