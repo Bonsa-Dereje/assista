@@ -4,10 +4,15 @@
   // ---------- Tauri window handle ----------
   let appWindow = null;
   let tauriReady = false;
-  let invoke = null; // set once Tauri's API is available
+  let invoke = null;
+  let keyboardWindow = null; // handle to the separate keyboard window
 
   // Brief, dismissable status line for lock errors (e.g. unsupported OS)
   // and for the escape-hotkey force-unlock, surfaced near the lock buttons.
+  // NOTE: this is now rendered in normal document flow (not position:absolute)
+  // so that when it appears, the ResizeObserver below picks up the extra
+  // height and grows the OS window to fit it — it's never clipped and it
+  // never needs a bigger-than-content window to have room to show up in.
   let lockNotice = '';
   let lockNoticeTimer = null;
   function flashLockNotice(text) {
@@ -17,22 +22,39 @@
   }
 
   let unlistenForceUnlock = null;
+  let unlistenKeyboardClosed = null;
+
+  // Wraps the toolbar (+ lock notice, when shown). This element's real,
+  // rendered box is what the OS window is kept sized to at all times.
+  let rootEl;
+  let resizeObserver;
+
+  function syncWindowSize() {
+    if (!tauriReady || !rootEl) return;
+    const rect = rootEl.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      appWindow.setSize(new (window.__tauriLogicalSize)(Math.ceil(rect.width), Math.ceil(rect.height)));
+    }
+  }
 
   onMount(async () => {
     if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const { getCurrentWindow, LogicalSize, LogicalPosition } = await import('@tauri-apps/api/window');
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
       const core = await import('@tauri-apps/api/core');
       const { listen } = await import('@tauri-apps/api/event');
 
       appWindow = getCurrentWindow();
       invoke = core.invoke;
       tauriReady = true;
-      // Whole surface starts click-through; toolbar/keyboard re-enable it on hover.
-      await appWindow.setIgnoreCursorEvents(true);
+      window.__tauriLogicalSize = LogicalSize;
+      window.__tauriLogicalPosition = LogicalPosition;
 
-      // Rust's low-level keyboard hook always lets Ctrl+Alt+Shift+U through
-      // and emits this event as a force-unlock signal, so the UI can never
-      // get stuck showing "locked" with no way back in.
+      keyboardWindow = await WebviewWindow.getByLabel('keyboard');
+
+      // The whole window IS the toolbar now, so there's nothing left to make
+      // click-through — no setIgnoreCursorEvents anywhere in this file.
+
       unlistenForceUnlock = await listen('input-lock://force-unlock', async () => {
         if (!keyboardLocked) return;
         keyboardLocked = false;
@@ -43,24 +65,18 @@
         }
         flashLockNotice('Keyboard unlocked (Ctrl+Alt+Shift+U)');
       });
+
+      // If the keyboard window is closed via its own [x] button, keep our
+      // toggle state (and icon) in sync.
+      unlistenKeyboardClosed = await listen('keyboard-window-closed', () => {
+        keyboardVisible = false;
+      });
+
+      resizeObserver = new ResizeObserver(() => syncWindowSize());
+      resizeObserver.observe(rootEl);
+      syncWindowSize();
     }
-    // Toolbar sits at left:18px, width:50px -> place keyboard just to its right for now.
-    keyboardPos = clampKbPos(18 + 50 + 12, 60);
-    window.addEventListener('resize', onWindowResize);
   });
-
-  function clampKbPos(x, y) {
-    const maxX = Math.max(8, window.innerWidth - KB_WIDTH - 8);
-    return { x: Math.min(Math.max(8, x), maxX), y: Math.max(8, y) };
-  }
-
-  function onWindowResize() {
-    keyboardPos = clampKbPos(keyboardPos.x, keyboardPos.y);
-  }
-
-  async function setInteractive(interactive) {
-    if (tauriReady) await appWindow.setIgnoreCursorEvents(!interactive);
-  }
 
   async function dragWindow(e) {
     if (e.button !== 0) return;
@@ -72,8 +88,24 @@
   let keyboardLocked = false;
   let touchpadLocked = false;
 
-  function toggleKeyboardPanel() {
+  async function toggleKeyboardPanel() {
     keyboardVisible = !keyboardVisible;
+    if (!tauriReady || !keyboardWindow) return;
+
+    if (keyboardVisible) {
+      // Place the keyboard window just to the right of the toolbar, using
+      // the toolbar's own real on-screen position/size.
+      const LogicalPosition = window.__tauriLogicalPosition;
+      const physPos = await appWindow.outerPosition();
+      const physSize = await appWindow.outerSize();
+      const scale = await appWindow.scaleFactor();
+      const pos = physPos.toLogical(scale);
+      const size = physSize.toLogical(scale);
+      await keyboardWindow.setPosition(new LogicalPosition(pos.x + size.width + 12, pos.y));
+      await keyboardWindow.show();
+    } else {
+      await keyboardWindow.hide();
+    }
   }
 
   async function toggleKeyboardLock() {
@@ -102,46 +134,14 @@
     }
   }
 
-  // ---------- Draggable on-screen keyboard ----------
-  const KB_WIDTH = 360;
-  let keyboardPos = { x: 400, y: 90 };
-  let kbDragging = false;
-  let kbOffset = { x: 0, y: 0 };
-
-  function startKbDrag(e) {
-    kbDragging = true;
-    kbOffset = { x: e.clientX - keyboardPos.x, y: e.clientY - keyboardPos.y };
-    window.addEventListener('pointermove', onKbDrag);
-    window.addEventListener('pointerup', endKbDrag);
-  }
-
-  function onKbDrag(e) {
-    if (!kbDragging) return;
-    keyboardPos = clampKbPos(e.clientX - kbOffset.x, e.clientY - kbOffset.y);
-  }
-
-  function endKbDrag() {
-    kbDragging = false;
-    window.removeEventListener('pointermove', onKbDrag);
-    window.removeEventListener('pointerup', endKbDrag);
-  }
-
   onDestroy(() => {
-    window.removeEventListener('pointermove', onKbDrag);
-    window.removeEventListener('pointerup', endKbDrag);
-    window.removeEventListener('resize', onWindowResize);
     clearTimeout(lockNoticeTimer);
     if (unlistenForceUnlock) unlistenForceUnlock();
+    if (unlistenKeyboardClosed) unlistenKeyboardClosed();
+    if (resizeObserver) resizeObserver.disconnect();
   });
 
-  // ---------- Keyboard key layout ----------
-  const rows = [
-    ['1','2','3','4','5','6','7','8','9','0','⌫'],
-    ['q','w','e','r','t','y','u','i','o','p'],
-    ['a','s','d','f','g','h','j','k','l','↵'],
-    ['⇧','z','x','c','v','b','n','m',',','.'],
-    ['Ctrl','Alt','␣','←','↓','↑','→']
-  ];
+  // ---------- Directional buttons ----------
   let pressed = '';
   function keyPress(k) {
     pressed = k;
@@ -149,13 +149,9 @@
   }
 </script>
 
-<div class="stage">
+<div class="root" bind:this={rootEl}>
   <!-- ===================== TOOLBAR ===================== -->
-  <aside
-    class="toolbar"
-    on:pointerenter={() => setInteractive(true)}
-    on:pointerleave={() => setInteractive(false)}
-  >
+  <aside class="toolbar">
     <div class="grip" on:pointerdown={dragWindow} title="Drag toolbar">
       <svg viewBox="0 0 20 20" fill="none">
         <circle cx="6" cy="5" r="1.4" fill="currentColor" />
@@ -261,70 +257,10 @@
         <path d="M10 11V8.7a2 2 0 0 1 4 0V11" />
       </svg>
     </button>
-
-    <div class="divider"></div>
-
-    <button class="tool-btn" title="Settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 13a7.9 7.9 0 0 0 0-2l2-1.5-2-3.4-2.3.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.6a8 8 0 0 0-1.7 1l-2.3-.9-2 3.4L6.6 11a7.9 7.9 0 0 0 0 2l-2 1.5 2 3.4 2.3-.9c.5.4 1.1.7 1.7 1L11 21h4l.4-2.6c.6-.3 1.2-.6 1.7-1l2.3.9 2-3.4-2-1.5z" />
-      </svg>
-    </button>
   </aside>
 
   {#if lockNotice}
-    <div class="lock-notice" style="left:{18 + 50 + 12}px; top:60px;">
-      {lockNotice}
-    </div>
-  {/if}
-
-  <!-- ===================== ON-SCREEN KEYBOARD ===================== -->
-  {#if keyboardVisible}
-    <div
-      class="kb-panel"
-      style="left:{keyboardPos.x}px; top:{keyboardPos.y}px; width:{KB_WIDTH}px;"
-      on:pointerenter={() => setInteractive(true)}
-      on:pointerleave={() => setInteractive(false)}
-    >
-      <div class="kb-header" on:pointerdown={startKbDrag}>
-        <div class="kb-grip">
-          <svg viewBox="0 0 20 8" fill="none">
-            <circle cx="2" cy="2" r="1.3" fill="currentColor" />
-            <circle cx="7" cy="2" r="1.3" fill="currentColor" />
-            <circle cx="12" cy="2" r="1.3" fill="currentColor" />
-            <circle cx="17" cy="2" r="1.3" fill="currentColor" />
-            <circle cx="2" cy="6" r="1.3" fill="currentColor" />
-            <circle cx="7" cy="6" r="1.3" fill="currentColor" />
-            <circle cx="12" cy="6" r="1.3" fill="currentColor" />
-            <circle cx="17" cy="6" r="1.3" fill="currentColor" />
-          </svg>
-        </div>
-        <span class="kb-title">On-Screen Keyboard</span>
-        <button class="kb-close" on:click={toggleKeyboardPanel} title="Close">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-      </div>
-
-      <div class="kb-body">
-        {#each rows as row, i}
-          <div class="kb-row">
-            {#each row as key}
-              <button
-                class="kb-key"
-                class:pressed={pressed === key}
-                class:wide={key === '⌫' || key === '↵' || key === '⇧' || key === 'Ctrl' || key === 'Alt'}
-                class:space={key === '␣'}
-                on:click={() => keyPress(key)}
-              >
-                {key}
-              </button>
-            {/each}
-          </div>
-        {/each}
-      </div>
-    </div>
+    <div class="lock-notice">{lockNotice}</div>
   {/if}
 </div>
 
@@ -336,21 +272,21 @@
     color-scheme: dark;
   }
 
-  .stage {
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
+  /* This element's rendered box == the OS window's box, kept in sync by
+     the ResizeObserver in the script above. No fixed/absolute positioning,
+     no full-screen overlay, no pointer-events:none — every pixel here is
+     real toolbar, and everything outside it is genuinely outside the
+     window, so the OS naturally passes clicks through to whatever's below. */
+  .root {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
     font-family: -apple-system, 'Segoe UI', Inter, sans-serif;
   }
 
   /* ===================== Toolbar ===================== */
-  /* Solid, self-contained vertical strip — not a floating glass blob. */
   .toolbar {
-    pointer-events: auto;
-    position: absolute;
-    top: 60px;
-    left: 18px;
-    width: 50px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -373,7 +309,7 @@
     color: rgba(255, 255, 255, 0.28);
     cursor: grab;
     border-radius: 6px;
-    margin-bottom: 2px;
+    margin: 0 10px 2px;
   }
   .grip:active { cursor: grabbing; }
   .grip svg { width: 15px; height: 15px; }
@@ -385,8 +321,6 @@
     margin: 5px 0;
   }
 
-  /* Each tool gets a fixed, always-visible slot — a defined rectangle of its
-     own, like a real toolbar cell, rather than a bare icon sitting in space. */
   .tool-btn {
     position: relative;
     width: 38px;
@@ -434,9 +368,9 @@
   }
 
   /* ===================== Lock notice ===================== */
+  /* Normal flow now (not position:absolute) so it grows the window itself
+     rather than needing pre-reserved dead space around the toolbar. */
   .lock-notice {
-    pointer-events: none;
-    position: absolute;
     max-width: 220px;
     padding: 7px 10px;
     border-radius: 8px;
@@ -447,92 +381,4 @@
     line-height: 1.35;
     box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
   }
-
-  /* ===================== Keyboard panel ===================== */
-  .kb-panel {
-    pointer-events: auto;
-    position: absolute;
-    border-radius: 14px;
-    background: rgba(20, 20, 22, 0.68);
-    backdrop-filter: blur(24px) saturate(140%);
-    -webkit-backdrop-filter: blur(24px) saturate(140%);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    box-shadow:
-      0 24px 60px rgba(0, 0, 0, 0.5),
-      inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    overflow: hidden;
-    user-select: none;
-  }
-
-  .kb-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
-    cursor: grab;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-  }
-  .kb-header:active { cursor: grabbing; }
-
-  .kb-grip { color: rgba(255, 255, 255, 0.3); display: flex; }
-  .kb-grip svg { width: 14px; height: 6px; }
-
-  .kb-title {
-    flex: 1;
-    font-size: 9px;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.45);
-  }
-
-  .kb-close {
-    width: 18px;
-    height: 18px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: rgba(255, 255, 255, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-  }
-  .kb-close:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
-  .kb-close svg { width: 11px; height: 11px; }
-
-  .kb-body {
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .kb-row {
-    display: flex;
-    gap: 4px;
-    justify-content: center;
-  }
-
-  .kb-key {
-    flex: 1;
-    min-width: 0;
-    height: 22px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.045);
-    color: rgba(235, 235, 238, 0.85);
-    font-size: 9px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: background 0.08s ease, transform 0.06s ease;
-  }
-  .kb-key:hover { background: rgba(255, 255, 255, 0.1); }
-  .kb-key.pressed,
-  .kb-key:active {
-    background: #f2f2f4;
-    color: #17171a;
-    transform: scale(0.95);
-  }
-  .kb-key.wide { flex: 1.8; font-size: 8px; }
-  .kb-key.space { flex: 5; }
 </style>

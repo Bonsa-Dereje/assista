@@ -13,11 +13,13 @@
     "macOSPrivateApi": true,
     "windows": [
       {
+        "label": "main",
         "title": "assista",
-        "width": 1920,
-        "height": 1080,
-        "x": 0,
-        "y": 0,
+        "url": "/",
+        "width": 80,
+        "height": 400,
+        "x": 18,
+        "y": 60,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
@@ -25,6 +27,23 @@
         "shadow": false,
         "skipTaskbar": false,
         "focus": true
+      },
+      {
+        "label": "keyboard",
+        "title": "assista-keyboard",
+        "url": "/keyboard",
+        "width": 360,
+        "height": 220,
+        "x": 148,
+        "y": 60,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "shadow": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false
       }
     ],
     "security": {
