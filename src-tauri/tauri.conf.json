@@ -16,7 +16,7 @@
         "label": "main",
         "title": "assista",
         "url": "/",
-        "width": 80,
+        "width": 400,
         "height": 400,
         "x": 18,
         "y": 60,
@@ -53,6 +53,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -60,5 +61,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxRjg4NDZGQkU3MTdDNUUKUldSZWZIRytiNFQ0NGJmUFFqemU5VkxqSHNkek5LUU50WmhlK2hESDN4VkxxSHh0NlNjYmxtY0sK",
+      "endpoints": [
+        "https://github.com/Bonsa-Dereje/assista/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

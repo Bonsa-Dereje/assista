@@ -310,6 +310,7 @@ fn show_keyboard_noactivate(app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(InputLockState::default())
         .invoke_handler(tauri::generate_handler![
@@ -362,10 +363,10 @@ mod win {
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
-        VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT,
-        VK_SHIFT, VK_SPACE, VK_UP, VK_TAB,
+        SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+        KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+        VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT,
+        VK_SPACE, VK_TAB, VK_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CallWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
@@ -409,7 +410,10 @@ mod win {
             PostThreadMessageW(handle.thread_id, WM_QUIT, WPARAM(0), LPARAM(0))
                 .map_err(|e| e.to_string())?;
         }
-        handle.join.join().map_err(|_| "hook thread panicked".to_string())?;
+        handle
+            .join
+            .join()
+            .map_err(|_| "hook thread panicked".to_string())?;
         Ok(())
     }
 
@@ -579,7 +583,11 @@ mod win {
                 ki: KEYBDINPUT {
                     wVk: vk,
                     wScan: 0,
-                    dwFlags: if key_up { KEYEVENTF_KEYUP } else { Default::default() },
+                    dwFlags: if key_up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        Default::default()
+                    },
                     time: 0,
                     dwExtraInfo: 0,
                 },
@@ -641,10 +649,10 @@ mod win {
     /// Sends Alt+Tab to switch windows
     pub fn send_alt_tab() -> Result<(), String> {
         let mut inputs = Vec::with_capacity(4);
-        inputs.push(key_input(VK_MENU, false));     // Alt down
-        inputs.push(key_input(VK_TAB, false));      // Tab down
-        inputs.push(key_input(VK_TAB, true));       // Tab up
-        inputs.push(key_input(VK_MENU, true));      // Alt up
+        inputs.push(key_input(VK_MENU, false)); // Alt down
+        inputs.push(key_input(VK_TAB, false)); // Tab down
+        inputs.push(key_input(VK_TAB, true)); // Tab up
+        inputs.push(key_input(VK_MENU, true)); // Alt up
 
         let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
         if sent as usize != inputs.len() {
